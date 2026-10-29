@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时爆仓提醒</title>
+<style>
+  :root {
+    --bg: #0e1420; --panel: #161d2e; --border: #26304a;
+    --text: #e8ecf4; --dim: #8b94a8;
+    --long: #f6465d;   /* 多单爆仓 = 看跌红 */
+    --short: #2ebd85;  /* 空单爆仓 = 看涨绿 */
+    --accent: #4a9dff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 16px; }
+  .module { max-width: 1280px; margin: 0 auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+
+  /* ===== 头部：标题 + 声音开关 + 筛选器 ===== */
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .head h2 { font-size: 16px; display: flex; align-items: center; gap: 6px; margin-right: auto; }
+  .sound-btn { background: none; border: none; cursor: pointer; color: var(--dim); padding: 2px; display: inline-flex; }
+  .sound-btn.on { color: var(--accent); }
+  .sound-btn:hover { color: var(--text); }
+  .conn { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--dim); }
+  .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+  .conn.ok .dot { background: var(--short); }
+  .conn.busy .dot { background: #f0b90b; animation: blink 1s infinite; }
+  .conn.err .dot { background: var(--long); }
+  @keyframes blink { 50% { opacity: .3; } }
+  .filter { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); }
+  .filter select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; height: 28px; padding: 0 6px; font-size: 12px; max-width: 120px; }
+
+  /* ===== 列表 ===== */
+  .list-head, .row { display: grid; grid-template-columns: 1.4fr 1fr .8fr 1fr 1fr .85fr .9fr; gap: 8px; padding: 8px 16px; align-items: center; }
+  .list-head { font-size: 12px; color: var(--dim); border-bottom: 1px solid var(--border); }
+  .rows { height: 480px; overflow-y: auto; }
+  .row { border-bottom: 1px solid rgba(38,48,74,.5); font-variant-numeric: tabular-nums; }
+  .row.flash-long  { animation: flashLong 1.2s ease-out; }
+  .row.flash-short { animation: flashShort 1.2s ease-out; }
+  @keyframes flashLong  { 0% { background: rgba(246,70,93,.35); } 100% { background: transparent; } }
+  @keyframes flashShort { 0% { background: rgba(46,189,133,.35); } 100% { background: transparent; } }
+  .sym { font-weight: 600; }
+  .exg { color: var(--dim); font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+  .badge.long  { color: var(--long);  background: rgba(246,70,93,.12); }
+  .badge.short { color: var(--short); background: rgba(46,189,133,.12); }
+  .num.long  { color: var(--long); }
+  .num.short { color: var(--short); }
+  .time { color: var(--dim); font-size: 12px; }
+  .frc { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .frc.up { color: var(--short); }
+  .frc.down { color: var(--long); }
+  .empty { padding: 60px 0; text-align: center; color: var(--dim); }
+  .stat { font-size: 12px; color: var(--dim); padding: 6px 16px; border-top: 1px solid var(--border); }
+
+  /* ===== 价格条 ===== */
+  /* 四币种固定同一行：等分栅格 + 不换行 + 弹性字号，放大时自动收缩而不折行 */
+  .pricebar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+  .ptk { display: flex; align-items: baseline; justify-content: center; gap: 8px; min-width: 0;
+         padding: 8px 10px; white-space: nowrap; border-right: 1px solid var(--border); }
+  .ptk:last-child { border-right: none; }
+  .psym { font-size: 13px; font-weight: 600; color: var(--dim); }
+  .quote { font-style: normal; }
+  /* 窄屏(含浏览器放大)时收起 /USDT 后缀，保证四币种始终同行 */
+  @media (max-width: 820px) {
+    .quote { display: none; }
+    .ptk { padding: 8px 6px; gap: 6px; }
+  }
+  .pprice { font-size: clamp(14px, 1.5vw, 19px); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pchg { font-size: clamp(11px, 0.95vw, 12px); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pprice.up, .pchg.up { color: var(--short); }
+  .pprice.down, .pchg.down { color: var(--long); }
+  .tick-up { animation: tickGlow .5s; --tick-c: rgba(46,189,133,.8); }
+  .tick-down { animation: tickGlow .5s; --tick-c: rgba(246,70,93,.8); }
+  @keyframes tickGlow { 0% { text-shadow: 0 0 14px var(--tick-c); } 100% { text-shadow: none; } }
+
+  /* ===== 资金费率条：BTC/ETH/SOL 永续 ===== */
+  .fundbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+  .fk { display: flex; align-items: baseline; justify-content: center; gap: 8px; min-width: 0;
+        padding: 5px 8px; font-size: 12px; white-space: nowrap; border-right: 1px solid var(--border); }
+  .fk:last-child { border-right: none; }
+  .fksym { font-weight: 600; color: var(--dim); }
+  .fkrate { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .fkrate.up { color: var(--short); }
+  .fkrate.down { color: var(--long); }
+  .fknext { color: var(--dim); font-variant-numeric: tabular-nums; }
+  @media (max-width: 820px) { .fk { padding: 5px 4px; gap: 5px; font-size: 11px; } }
+</style>
+</head>
+<body>
+
+<div class="module">
+  <div class="head">
+    <h2>
+      实时爆仓单
+      <button id="soundBtn" class="sound-btn" title="声音开关"></button>
+    </h2>
+    <span id="conn" class="conn busy"><span class="dot"></span><span id="connText">连接中</span></span>
+    <label class="filter">交易所 <select id="fExchange">
+      <option value="">ALL</option>
+      <option value="Binance">Binance</option>
+      <option value="Hyperliquid">Hyperliquid</option>
+    </select></label>
+    <label class="filter">交易对 <select id="fCoin"><option value="">ALL</option></select></label>
+    <label class="filter">金额 ≥ <select id="fAmount">
+      <option value="0">ALL</option>
+      <option value="10000">$1万</option>
+      <option value="50000">$5万</option>
+      <option value="100000">$10万</option>
+      <option value="500000">$50万</option>
+      <option value="1000000">$100万</option>
+    </select></label>
+  </div>
+  <div class="pricebar" id="priceBar"></div>
+  <div class="fundbar" id="fundBar"></div>
+  <div class="list-head">
+    <span>交易对</span><span>交易所</span><span>方向</span><span>价格</span><span>金额($)</span>
+    <span title="Binance USDT 永续当期资金费率">资金费率</span><span>时间</span>
+  </div>
+  <div id="rows" class="rows"><div class="empty">等待爆仓数据…</div></div>
+  <div id="stat" class="stat">已接收 0 条 · 显示 0 条</div>
+</div>
+
+<script>
+'use strict';
+/* ================================================================
+ * 实时爆仓提醒模块
+ * 数据源: wss://ws.coinank.com/ws/new  频道: liqOrder@All@All@1m
+ * 推送帧: {op:"push", args:"liqOrder@...", data:[{exchangeName,
+ *         baseCoin, contractCode, posSide, price, amount,
+ *         tradeTurnover, ts}]}
+ * ================================================================ */
+
+const WS_URL   = 'wss://ws.coinank.com/ws/new';
+const CHANNEL  = 'liqOrder@All@All@1m';
+const MAX_ROWS = 100;          // 列表最大保留条数
+const PING_MS  = 25000;        // 心跳间隔
+const RECON_MAX = 30000;       // 重连退避上限
+
+/* ---------------- 1. WebSocket 客户端：订阅 / 心跳 / 自动重连 ---------------- */
+class LiqSocket {
+  constructor(onOrders, onState) {
+    this.onOrders = onOrders;  // 收到爆仓单数组回调
+    this.onState  = onState;   // 连接状态回调: 'busy' | 'ok' | 'err'
+    this.retry = 0;
+    this.ws = null;
+    this.pingTimer = null;
+    this.closed = false;
+  }
+  connect() {
+    this.onState('busy');
+    this.ws = new WebSocket(WS_URL);
+    this.ws.onopen = () => {
+      this.retry = 0;
+      this.ws.send(JSON.stringify({ op: 'subscribe', args: CHANNEL }));
+      this.onState('ok');
+      this.pingTimer = setInterval(() => {
+        if (this.ws.readyState === 1) this.ws.send('ping');  // 文本心跳
+      }, PING_MS);
+    };
+    this.ws.onmessage = (ev) => {
+      const raw = ev.data;
+      if (raw === 'ping' || raw === 'pong') return;
+      let msg;
+      try { msg = JSON.parse(raw); } catch { return; }
+      if (msg.op === 'push' && typeof msg.args === 'string'
+          && msg.args.indexOf('liqOrder@') === 0 && Array.isArray(msg.data)) {
+        this.onOrders(msg.data);
+      }
+    };
+    this.ws.onclose = () => this.scheduleReconnect();
+    this.ws.onerror = () => { try { this.ws.close(); } catch {} };
+  }
+  scheduleReconnect() {
+    clearInterval(this.pingTimer);
+    if (this.closed) return;
+    this.onState('err');
+    const wait = Math.min(1000 * 2 ** this.retry++, RECON_MAX);  // 指数退避
+    setTimeout(() => { if (!this.closed) this.connect(); }, wait);
+  }
+  close() {
+    this.closed = true;
+    clearInterval(this.pingTimer);
+    try { this.ws && this.ws.close(); } catch {}
+  }
+}
+
+/* ---------------- 2. 声音播放：CoinAnk 原版音效，开关持久化 ---------------- */
+class SoundPlayer {
+  constructor() {
+    this.enabled = JSON.parse(localStorage.getItem('liqPlay') || 'false');
+    this.sounds = {
+      long:  new Audio('long.mp3'),    // 多单爆仓原声
+      short: new Audio('short.mp3'),   // 空单爆仓原声
+    };
+    Object.values(this.sounds).forEach(a => { a.preload = 'auto'; });
+  }
+  toggle() {
+    this.enabled = !this.enabled;
+    localStorage.setItem('liqPlay', JSON.stringify(this.enabled));
+    if (this.enabled) this.unlock();   // 借点击手势解锁浏览器自动播放限制
+    return this.enabled;
+  }
+  unlock() {
+    Object.values(this.sounds).forEach(a => {
+      a.muted = true;
+      a.play()
+        .then(() => { a.pause(); a.currentTime = 0; a.muted = false; })
+        .catch(() => { a.muted = false; });
+    });
+  }
+  /* posSide=long(多单爆仓) → long.mp3；short(空单爆仓) → short.mp3 */
+  play(posSide) {
+    if (!this.enabled) return;
+    const a = this.sounds[posSide === 'long' ? 'long' : 'short'];
+    a.currentTime = 0;                 // 支持连续爆仓快速重触发
+    a.play().catch(() => {});
+  }
+}
+
+/* ---------------- 3. 数据存储：去重 / 上限 / 三维筛选 ---------------- */
+class OrderStore {
+  constructor() {
+    this.all = [];        // 全量（含被过滤掉的）
+    this.seen = new Set(); // 去重键集合
+    this.total = 0;
+    this.filters = { exchange: '', coin: '', amount: 0 };
+  }
+  static key(o) {
+    return [o.exchangeName, o.contractCode, o.ts, o.price, o.tradeTurnover, o.posSide].join('|');
+  }
+  match(o) {
+    const f = this.filters;
+    if (f.exchange && (o.exchangeName || '').toLowerCase() !== f.exchange.toLowerCase()) return false;
+    if (f.coin && o.baseCoin !== f.coin) return false;
+    if (f.amount && Number(o.tradeTurnover) < f.amount) return false;
+    return true;
+  }
+  /* 返回通过筛选的新单（带 isNew 标记），未通过的不返回 */
+  push(list) {
+    const fresh = [];
+    for (const o of list) {
+      const k = OrderStore.key(o);
+      if (this.seen.has(k)) continue;
+      this.seen.add(k);
+      this.all.unshift(o);
+      this.total++;
+      if (this.match(o)) fresh.push(o);
+    }
+    if (this.all.length > 500) {  // 全量缓冲兜底，防内存膨胀
+      this.all.length = 500;
+      this.rebuildSeen();
+    }
+    return fresh;
+  }
+  rebuildSeen() {
+    this.seen = new Set(this.all.map(OrderStore.key));
+  }
+  visible() {
+    return this.all.filter(o => this.match(o)).slice(0, MAX_ROWS);
+  }
+}
+
+/* ---------------- 4. 渲染与交互 ---------------- */
+const $ = id => document.getElementById(id);
+const rowsEl = $('rows'), statEl = $('stat');
+const store  = new OrderStore();
+const sound  = new SoundPlayer();
+
+const fmtNum = (n, d = 6) => Number(n).toLocaleString('en-US', { maximumFractionDigits: d });
+const fmtAmt = n => Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+const fmtTime = ts => {
+  const d = new Date(Number(ts));
+  const p = x => String(x).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+
+function rowHtml(o) {
+  const isLong = o.posSide === 'long';
+  const cls = isLong ? 'long' : 'short';
+  return `<span class="sym">${o.contractCode || o.baseCoin}</span>
+    <span class="exg">${o.exchangeName || ''}</span>
+    <span><i class="badge ${cls}">${isLong ? '多单' : '空单'}</i></span>
+    <span class="num ${cls}">${fmtNum(o.price)}</span>
+    <span class="num ${cls}">${fmtAmt(o.tradeTurnover)}</span>
+    ${fundCellHtml(o)}
+    <span class="time">${fmtTime(o.ts)}</span>`;
+}
+
+function renderRows(list, flashNew) {
+  if (!list.length) {
+    rowsEl.innerHTML = '<div class="empty">当前筛选条件下暂无数据</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  list.forEach((o, i) => {
+    const div = document.createElement('div');
+    div.className = 'row';
+    if (flashNew && i < flashNew) div.classList.add(o.posSide === 'long' ? 'flash-long' : 'flash-short');
+    div.innerHTML = rowHtml(o);
+    frag.appendChild(div);
+  });
+  rowsEl.innerHTML = '';
+  rowsEl.appendChild(frag);
+}
+
+function updateStat(visibleCount) {
+  statEl.textContent = `已接收 ${store.total} 条 · 显示 ${visibleCount} 条`;
+}
+
+/* ---------------- 9. 单条爆仓的资金费率：全量快照缓存（5 分钟 TTL） ---------------- */
+const fundCache = { map: {}, ts: 0, loading: false };
+
+function fundCandidates(o) {
+  const code = (o.contractCode || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const base = (o.baseCoin || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const list = [];
+  if (/USDT$/.test(code)) list.push(code);      // 如 IOTXUSDT / BTC-USDT-SWAP → BTCUSDT
+  if (base) { list.push(base + 'USDT', '1000' + base + 'USDT'); }   // 处理 1000PEPE 这类命名
+  return [...new Set(list)];
+}
+
+function resolveRate(o) {
+  const cands = fundCandidates(o);
+  for (const k of cands) if (fundCache.map[k] !== undefined) return { key: k, v: fundCache.map[k] };
+  return { key: cands[0] || '', v: undefined };
+}
+
+function fmtRate(v) {
+  return (v >= 0 ? '+' : '') + v.toFixed(4) + '%';
+}
+
+function fundCellHtml(o) {
+  const { key, v } = resolveRate(o);
+  const cls = v === undefined ? '' : v >= 0 ? 'up' : 'down';
+  const alt = fundCandidates(o).join('|');
+  return `<span class="frc ${cls}" data-fk="${alt || key}">${v === undefined ? '—' : fmtRate(v)}</span>`;
+}
+
+function refreshFundCells() {
+  document.querySelectorAll('.row [data-fk]').forEach(el => {
+    const v = el.getAttribute('data-fk').split('|').map(k => fundCache.map[k]).find(x => x !== undefined);
+    el.textContent = v === undefined ? '—' : fmtRate(v);
+    el.className = 'frc ' + (v === undefined ? '' : v >= 0 ? 'up' : 'down');
+  });
+}
+
+async function loadFundMap() {
+  if (fundCache.loading || Date.now() - fundCache.ts < 5 * 60 * 1000) return;
+  fundCache.loading = true;
+  try {
+    const r = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex');
+    const arr = await r.json();
+    const m = {};
+    arr.forEach(d => { m[d.symbol] = parseFloat(d.lastFundingRate) * 100; });
+    fundCache.map = m;
+    fundCache.ts = Date.now();
+    refreshFundCells();               // 回填已渲染行的费率
+  } catch {}
+  fundCache.loading = false;
+}
+
+/* 交易对选项：24H 交易量前十的 USDT 永续合约（Binance 合约公开接口，失败时用兜底名单） */
+const FALLBACK_COINS = ['BTC','ETH','SOL','XRP','DOGE','BNB','ADA','LINK','AVAX','LTC'];
+const STABLES = new Set(['USDC','USDP','FDUSD','TUSD','USD1','RLUSD','DAI','BUSD','BFUSD']);
+async function loadTopCoins() {
+  let coins = FALLBACK_COINS;
+  try {
+    const res = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
+    const data = await res.json();
+    coins = data
+      .filter(d => d.symbol.endsWith('USDT') && !STABLES.has(d.symbol.slice(0, -4)))
+      .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
+      .slice(0, 10)
+      .map(d => d.symbol.slice(0, -4));
+  } catch (e) { /* 接口不可达时使用兜底名单 */ }
+  const sel = $('fCoin');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">ALL</option>' +
+    coins.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.value = cur;
+}
+
+/* 连接状态灯 */
+function setConn(state) {
+  const el = $('conn');
+  el.className = 'conn ' + state;
+  $('connText').textContent = { busy: '连接中', ok: '已连接', err: '已断开·重连中' }[state];
+}
+
+/* 声音开关按钮（SVG 图标） */
+const ICON_ON  = '<svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M10 2.5V17.5C7.08 17.5 4.92 13.68 4.92 13.68H2.5A.83.83 0 0 1 1.67 12.85V7.09c0-.46.37-.83.83-.83h2.42S7.08 2.5 10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.5 7.5a3.54 3.54 0 0 1 0 5M15.8 5.2a6.2 6.2 0 0 1 0 9.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const ICON_OFF = '<svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.97 8.45l-3.53 3.54M13.44 8.45l3.53 3.54" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M10 2.5V17.5C7.08 17.5 4.92 13.68 4.92 13.68H2.5A.83.83 0 0 1 1.67 12.85V7.09c0-.46.37-.83.83-.83h2.42S7.08 2.5 10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+function renderSoundBtn() {
+  const btn = $('soundBtn');
+  btn.innerHTML = sound.enabled ? ICON_ON : ICON_OFF;
+  btn.classList.toggle('on', sound.enabled);
+}
+
+/* ---------------- 6. 实时价格条：Binance 公共 miniTicker 组合流（免鉴权，约1次/秒） ---------------- */
+const SYMBOLS = ['BTC', 'ETH', 'SOL', 'XAUT'];
+
+function initPriceBar() {
+  $('priceBar').innerHTML = SYMBOLS.map(s =>
+    `<span class="ptk"><span class="psym">${s}<i class="quote">/USDT</i></span>` +
+    `<span id="p_${s}" class="pprice">--</span>` +
+    `<span id="c_${s}" class="pchg">--</span></span>`
+  ).join('');
+}
+
+class PriceTicker {
+  constructor(onTick) { this.onTick = onTick; this.retry = 0; this.ws = null; }
+  connect() {
+    const streams = SYMBOLS.map(s => s.toLowerCase() + 'usdt@miniTicker').join('/');
+    this.ws = new WebSocket('wss://stream.binance.com:9443/stream?streams=' + streams);
+    this.ws.onopen = () => { this.retry = 0; };
+    this.ws.onmessage = ev => {
+      try {
+        const d = (JSON.parse(ev.data) || {}).data;
+        if (d && d.c) this.onTick(d.s.replace('USDT', ''), { price: +d.c, open: +d.o });
+      } catch {}
+    };
+    this.ws.onclose = () => {
+      const wait = Math.min(1000 * 2 ** this.retry++, 15000);
+      setTimeout(() => this.connect(), wait);
+    };
+    this.ws.onerror = () => { try { this.ws.close(); } catch {} };
+  }
+}
+
+const lastPrices = {};
+function renderTick(sym, t) {
+  const priceEl = $('p_' + sym), chgEl = $('c_' + sym);
+  if (!priceEl) return;
+  const chg = (t.price - t.open) / t.open * 100;
+  const up = chg >= 0;
+  priceEl.textContent = fmtNum(t.price, t.price < 100 ? 2 : 1);
+  chgEl.textContent = (up ? '+' : '') + chg.toFixed(2) + '%';
+  priceEl.className = 'pprice ' + (up ? 'up' : 'down');
+  chgEl.className = 'pchg ' + (up ? 'up' : 'down');
+  const last = lastPrices[sym];
+  if (last !== undefined && t.price !== last) {        // 跳动闪烁
+    priceEl.classList.remove('tick-up', 'tick-down');
+    void priceEl.offsetWidth;
+    priceEl.classList.add(t.price > last ? 'tick-up' : 'tick-down');
+  }
+  lastPrices[sym] = t.price;
+}
+
+/* ---------------- 5. 事件绑定与启动 ---------------- */
+function bindEvents() {
+  $('soundBtn').onclick = () => { sound.toggle(); renderSoundBtn(); };
+  $('fExchange').onchange = e => { store.filters.exchange = e.target.value; applyFilters(); };
+  $('fCoin').onchange     = e => { store.filters.coin = e.target.value;     applyFilters(); };
+  $('fAmount').onchange   = e => {
+    store.filters.amount = Number(e.target.value);
+    localStorage.setItem('liqAmount', e.target.value);
+    applyFilters();
+  };
+}
+/* ---------------- 8. 资金费率：BTC/ETH/SOL 永续（60s 刷新 + 秒级结算倒计时） ---------------- */
+const FUND_SYMBOLS = ['BTC', 'ETH', 'SOL'];
+
+function initFundBar() {
+  $('fundBar').innerHTML = FUND_SYMBOLS.map(s =>
+    `<span class="fk"><span class="fksym">${s}</span>` +
+    `<span id="f_${s}" class="fkrate">--</span>` +
+    `<span id="n_${s}" class="fknext">--</span></span>`
+  ).join('');
+}
+
+class FundingRate {
+  constructor() { this.nextTs = {}; }
+  async load() {
+    await Promise.all(FUND_SYMBOLS.map(async s => {
+      const el = $('f_' + s);
+      try {
+        const r = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${s}USDT`);
+        const d = await r.json();
+        const rate = parseFloat(d.lastFundingRate) * 100;   // 0.0001 → 0.01%
+        el.textContent = (rate >= 0 ? '+' : '') + rate.toFixed(4) + '%';
+        el.className = 'fkrate ' + (rate >= 0 ? 'up' : 'down');
+        this.nextTs[s] = d.nextFundingTime;
+      } catch {
+        if (el) { el.textContent = '--'; el.className = 'fkrate'; }
+      }
+    }));
+    this.tick();
+  }
+  tick() {
+    const now = Date.now();
+    FUND_SYMBOLS.forEach(s => {
+      const ts = this.nextTs[s], el = $('n_' + s);
+      if (!ts || !el) return;
+      const left = ts - now;
+      if (left <= 0) { el.textContent = '结算中'; return; }
+      const h = Math.floor(left / 3600000);
+      const m = String(Math.floor((left % 3600000) / 60000)).padStart(2, '0');
+      const sec = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
+      el.textContent = `剩 ${h}:${m}:${sec}`;
+    });
+  }
+}
+
+function applyFilters() {
+  const vis = store.visible();
+  renderRows(vis, 0);
+  updateStat(vis.length);
+}
+
+function init() {
+  /* 恢复持久化设置 */
+  const savedAmt = localStorage.getItem('liqAmount');
+  if (savedAmt !== null) {
+    store.filters.amount = Number(savedAmt);
+    $('fAmount').value = savedAmt;
+  }
+  renderSoundBtn();
+  bindEvents();
+  loadTopCoins();                       // 加载交易量前十交易对
+  initPriceBar();
+  new PriceTicker(renderTick).connect();   // BTC/ETH/SOL/XAUT 实时价格条
+  initFundBar();
+  const funding = new FundingRate();       // BTC/ETH/SOL 资金费率
+  funding.load();
+  setInterval(() => funding.load(), 60000);
+  setInterval(() => funding.tick(), 1000);
+  loadFundMap();                           // 全量费率快照，供每行爆仓单展示
+  setInterval(loadFundMap, 5 * 60 * 1000);
+
+  const socket = new LiqSocket(
+    (orders) => {                       // 收到推送
+      const fresh = store.push(orders.slice().reverse());
+      if (fresh.length) {
+        const vis = store.visible();
+        renderRows(vis, fresh.length);  // 新行闪烁
+        rowsEl.scrollTop = 0;           // 滚动置顶
+        updateStat(vis.length);
+        fresh.forEach(o => sound.play(o.posSide));  // 多/空不同提示音
+      } else {
+        updateStat(store.visible().length);
+      }
+    },
+    setConn
+  );
+  socket.connect();
+  window.addEventListener('beforeunload', () => socket.close());
+}
+init();
+</script>
+</body>
+</html>

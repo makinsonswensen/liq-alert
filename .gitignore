@@ -1,0 +1,4 @@
+# 本地调试截图与工具缓存
+*.png
+.screenshots/
+.wrangler/
